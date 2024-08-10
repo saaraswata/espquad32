@@ -19,7 +19,7 @@ For more information, please check the sections below:
 
 1. Stabilize Mode
 2. Height-hold Mode
-3. Altitud-hold Mode
+3. Altitude-hold Mode
 4. Position-hold Mode
 5. APP Control
 6. CFclient Supported
