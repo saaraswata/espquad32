@@ -7,7 +7,7 @@
 
 > Currently support ESP32, ESP32S2, ESP32S3, please using ESP-IDF [release/v4.4](https://docs.espressif.com/projects/esp-idf/en/release-v4.4/esp32/get-started/index.html) branch as your develop environment
 
-![ESP-Drone](./docs/_static/espdrone_s2_v1_2_2.png)
+![ESP-Drone](./pics/drone1.jpg)
 
 For more information, please check the sections below:
 * **Getting Started**: 
