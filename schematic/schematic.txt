@@ -1,0 +1,36 @@
+ESP32 GPIO | MPU6050
+3v3        |  Vin
+Gnd        |  Gnd
+32         |  SDA
+33         |  SCL
+23         |  INT
+
+ESP32 GPIO |   ESC
+16         |  Mot_1  
+4          |  Mot_2
+12         |  Mot_3
+14         |  Mot_4
+
+MPU6050 | MS5611
+3v3     |  3v3
+Gnd     |  Gnd
+XDA     |  SDA
+XCL     |  SCL
+
+Info about Motors:
+Using 8520 brushless Motors. If using 716/715 coreless motors then select 715 from Menuconfig
+Mot_1 and Mot_3: CCW
+Mot_2 and Mot_4: CW
+
+Info about MPU6050 Placement and Direction:
+MPU6050 can be placed anywhere on the drone. The Pinout of the MPU6050 should be on the right side, and this is the position where forward of you is forward of the drone.
+
+NOTE:
+* Connecting INT pin is only required for ESP32. ESP32 S2 and S3 don't need this pin to be connected.
+* Use High Current rate batteries. I'm using Orange 3.8v 90C/180C 550mah (Best choice) AND/OR Bonka 3.7v 600mah 25C Lipo battery (not so preferred, but flies)
+* Pins can be changed from menuconfig
+
+I am getting approx 5 mins of flight time with both the batteries but the drone flies much higher and better with Orange 3.8v 90C/180C lipo cell.
+You can also use 1000mah 30C 3.7v batteries.
+
+
