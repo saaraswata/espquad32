@@ -1,0 +1,2 @@
+This Drone is made with ESP32 Devkit (38 pin).
+The pictures of this drone are uploaded to this folder for reference.
