@@ -1,0 +1,3 @@
+* Python 3.6 <= VERSION <= 3.9 (Preferred 3.8)
+* Pyqt 5.13
+* ESP-IDF Release v4.4
