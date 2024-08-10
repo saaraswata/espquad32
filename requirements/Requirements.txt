@@ -1,0 +1,12 @@
+Parts Required:
+* ESP32 Dev Board
+* MPU6050
+* MS5611
+* 4 x 8520 Coreless Motor
+* 4 x AO3400A N channel mosfet
+* SS14 (Preferred SS34) SMD Diode
+* 10k SMD Resistor
+* Bare PCB Board]
+* Wires for Connecting
+* Battery Connector
+* Mini Voltage Boost Converter 3.7v to 5v Constant Upto 2A
