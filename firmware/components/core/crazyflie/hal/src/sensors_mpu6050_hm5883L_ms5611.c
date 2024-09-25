@@ -347,7 +347,6 @@ void processAccGyroMeasurements(const uint8_t *buffer)
     gyroRaw.x = (((int16_t)buffer[8]) << 8) | buffer[9];
     gyroRaw.y = (((int16_t)buffer[10]) << 8) | buffer[11];
     gyroRaw.z = (((int16_t)buffer[12]) << 8) | buffer[13];
-    
 #else
     /* sensors step 2.1 read from buffer */
     accelRaw.y = (((int16_t)buffer[0]) << 8) | buffer[1];
