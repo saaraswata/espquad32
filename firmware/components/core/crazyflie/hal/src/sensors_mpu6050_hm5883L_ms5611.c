@@ -341,20 +341,14 @@ void processAccGyroMeasurements(const uint8_t *buffer)
 
 #ifdef CONFIG_TARGET_ESPLANE_V1
     /* sensors step 2.1 read from buffer */
-    /*
-    accelRaw.x = (((int16_t)buffer[0]) << 8) | buffer[1];
-    accelRaw.y = (((int16_t)buffer[2]) << 8) | buffer[3];
-    accelRaw.z = (((int16_t)buffer[4]) << 8) | buffer[5];
-    gyroRaw.x = (((int16_t)buffer[8]) << 8) | buffer[9];
-    gyroRaw.y = (((int16_t)buffer[10]) << 8) | buffer[11];
-    gyroRaw.z = (((int16_t)buffer[12]) << 8) | buffer[13];
-    */
-    accelRaw.y = (((int16_t)buffer[0]) << 8) | buffer[1];
-    accelRaw.x = (((int16_t)buffer[2]) << 8) | buffer[3];
-    accelRaw.z = (((int16_t)buffer[4]) << 8) | buffer[5];
-    gyroRaw.y = (((int16_t)buffer[8]) << 8) | buffer[9];
-    gyroRaw.x = (((int16_t)buffer[10]) << 8) | buffer[11];
-    gyroRaw.z = (((int16_t)buffer[12]) << 8) | buffer[13];
+    
+    accelRaw.x = -(((int16_t)buffer[0]) << 8) | buffer[1];
+    accelRaw.y = -(((int16_t)buffer[2]) << 8) | buffer[3];
+    accelRaw.z = -(((int16_t)buffer[4]) << 8) | buffer[5];
+    gyroRaw.x = -(((int16_t)buffer[8]) << 8) | buffer[9];
+    gyroRaw.y = -(((int16_t)buffer[10]) << 8) | buffer[11];
+    gyroRaw.z = -(((int16_t)buffer[12]) << 8) | buffer[13];
+    
 #else
     /* sensors step 2.1 read from buffer */
     accelRaw.y = (((int16_t)buffer[0]) << 8) | buffer[1];
@@ -379,8 +373,7 @@ void processAccGyroMeasurements(const uint8_t *buffer)
 
     /* sensors step 2.4 convert  digtal value to physical angle */
 #ifdef CONFIG_TARGET_ESPLANE_V1
-    //sensorData.gyro.x = (gyroRaw.x - gyroBias.x) * SENSORS_DEG_PER_LSB_CFG;
-    sensorData.gyro.x = -(gyroRaw.x - gyroBias.x) * SENSORS_DEG_PER_LSB_CFG;
+    sensorData.gyro.x = (gyroRaw.x - gyroBias.x) * SENSORS_DEG_PER_LSB_CFG;
 #else
     sensorData.gyro.x = -(gyroRaw.x - gyroBias.x) * SENSORS_DEG_PER_LSB_CFG;
 #endif
@@ -391,8 +384,7 @@ void processAccGyroMeasurements(const uint8_t *buffer)
     applyAxis3fLpf((lpf2pData *)(&gyroLpf), &sensorData.gyro);
 
 #ifdef CONFIG_TARGET_ESPLANE_V1
-    //accScaled.x = (accelRaw.x) * SENSORS_G_PER_LSB_CFG / accScale;
-    accScaled.x = -(accelRaw.x) * SENSORS_G_PER_LSB_CFG / accScale;
+    accScaled.x = (accelRaw.x) * SENSORS_G_PER_LSB_CFG / accScale;
 #else
     accScaled.x = -(accelRaw.x) * SENSORS_G_PER_LSB_CFG / accScale;   
 #endif
