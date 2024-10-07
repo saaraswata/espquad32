@@ -14,8 +14,8 @@ ESP32 GPIO |   ESC
 MPU6050 | MS5611
 3v3     |  3v3
 Gnd     |  Gnd
-XDA     |  SDA
-XCL     |  SCL
+SDA     |  SDA
+SCL     |  SCL
 
 Info about Motors:
 Using 8520 brushless Motors. If using 716/715 coreless motors then select 715 from Menuconfig
