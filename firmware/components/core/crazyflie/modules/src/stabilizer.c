@@ -7,7 +7,7 @@
  *
  * Crazyflie Firmware
  *
- * Copyright (C) 2011-2016 Bitcraze AB
+ * Copyright (C) 2011-2012 Bitcraze AB
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -23,187 +23,141 @@
  *
  *
  */
-
 #include <math.h>
-#include <inttypes.h>
 
 #include "FreeRTOS.h"
 #include "task.h"
 
-#include "stm32_legacy.h"
+#include "config.h"
 #include "system.h"
-#include "log.h"
-#include "param.h"
-#include "motors.h"
-#include "pm_esplane.h"
-#include "esp_timer.h"
+#include "pm.h"
 #include "stabilizer.h"
-#include "sensors.h"
 #include "commander.h"
-#include "crtp_localization_service.h"
-#include "sitaw.h"
 #include "controller.h"
-#include "power_distribution.h"
-//#include "collision_avoidance.h"
+#include "sensfusion6.h"
+#include "imu.h"
+#include "motors.h"
+#include "log.h"
+#include "pid.h"
+#include "ledseq.h"
+#include "param.h"
+//#include "ms5611.h"
+#include "lps25h.h"
+#include "debug.h"
 
-#include "estimator.h"
-//#include "usddeck.h" //usddeckLoggingMode_e
-#include "quatcompress.h"
-#include "statsCnt.h"
-#define DEBUG_MODULE "STAB"
-#include "debug_cf.h"
-#include "static_mem.h"
-#include "rateSupervisor.h"
+#undef max
+#define max(a,b) ((a) > (b) ? (a) : (b))
+#undef min
+#define min(a,b) ((a) < (b) ? (a) : (b))
+
+/**
+ * Defines in what divided update rate should the attitude
+ * control loop run relative the rate control loop.
+ */
+#define ATTITUDE_UPDATE_RATE_DIVIDER  2
+#define FUSION_UPDATE_DT  (float)(1.0 / (IMU_UPDATE_FREQ / ATTITUDE_UPDATE_RATE_DIVIDER)) // 250hz
+
+// Barometer/ Altitude hold stuff
+#define ALTHOLD_UPDATE_RATE_DIVIDER  5 // 500hz/5 = 100hz for barometer measurements
+#define ALTHOLD_UPDATE_DT  (float)(1.0 / (IMU_UPDATE_FREQ / ALTHOLD_UPDATE_RATE_DIVIDER))   // 500hz
+
+static Axis3f gyro; // Gyro axis data in deg/s
+static Axis3f acc;  // Accelerometer axis data in mG
+static Axis3f mag;  // Magnetometer axis data in testla
+
+static float eulerRollActual;
+static float eulerPitchActual;
+static float eulerYawActual;
+static float eulerRollDesired;
+static float eulerPitchDesired;
+static float eulerYawDesired;
+static float rollRateDesired;
+static float pitchRateDesired;
+static float yawRateDesired;
+
+// Baro variables
+static float temperature; // temp from barometer
+static float pressure;    // pressure from barometer
+static float asl;     // smoothed asl
+static float aslRaw;  // raw asl
+static float aslLong; // long term asl
+
+// Altitude hold variables
+static PidObject altHoldPID; // Used for altitute hold mode. I gets reset when the bat status changes
+bool altHold = false;          // Currently in altitude hold mode
+bool setAltHold = false;      // Hover mode has just been activated
+static float accWZ     = 0.0;
+static float accMAG    = 0.0;
+static float vSpeedASL = 0.0;
+static float vSpeedAcc = 0.0;
+static float vSpeed    = 0.0; // Vertical speed (world frame) integrated from vertical acceleration
+static float altHoldPIDVal;                    // Output of the PID controller
+static float altHoldErr;                       // Different between target and current altitude
+
+// Altitude hold & Baro Params
+static float altHoldKp              = 0.5;  // PID gain constants, used everytime we reinitialise the PID controller
+static float altHoldKi              = 0.18;
+static float altHoldKd              = 0.0;
+static float altHoldChange          = 0;     // Change in target altitude
+static float altHoldTarget          = -1;    // Target altitude
+static float altHoldErrMax          = 1.0;   // max cap on current estimated altitude vs target altitude in meters
+static float altHoldChange_SENS     = 200;   // sensitivity of target altitude change (thrust input control) while hovering. Lower = more sensitive & faster changes
+static float pidAslFac              = 13000; // relates meters asl to thrust
+static float pidAlpha               = 0.8;   // PID Smoothing //TODO: shouldnt need to do this
+static float vSpeedASLFac           = 0;    // multiplier
+static float vSpeedAccFac           = -48;  // multiplier
+static float vAccDeadband           = 0.05;  // Vertical acceleration deadband
+static float vSpeedASLDeadband      = 0.005; // Vertical speed based on barometer readings deadband
+static float vSpeedLimit            = 0.05;  // used to constrain vertical velocity
+static float errDeadband            = 0.00;  // error (target - altitude) deadband
+static float vBiasAlpha             = 0.98; // Blending factor we use to fuse vSpeedASL and vSpeedAcc
+static float aslAlpha               = 0.92; // Short term smoothing
+static float aslAlphaLong           = 0.93; // Long term smoothing
+static uint16_t altHoldMinThrust    = 00000; // minimum hover thrust - not used yet
+static uint16_t altHoldBaseThrust   = 43000; // approximate throttle needed when in perfect hover. More weight/older battery can use a higher value
+static uint16_t altHoldMaxThrust    = 60000; // max altitude hold thrust
+
+
+RPYType rollType;
+RPYType pitchType;
+RPYType yawType;
+
+uint16_t actuatorThrust;
+int16_t  actuatorRoll;
+int16_t  actuatorPitch;
+int16_t  actuatorYaw;
+
+uint32_t motorPowerM4;
+uint32_t motorPowerM2;
+uint32_t motorPowerM1;
+uint32_t motorPowerM3;
 
 static bool isInit;
-static bool emergencyStop = false;
-static int emergencyStopTimeout = EMERGENCY_STOP_TIMEOUT_DISABLED;
 
-static bool checkStops;
-
-#define PROPTEST_NBR_OF_VARIANCE_VALUES   100
-static bool startPropTest = false;
-
-uint32_t inToOutLatency;
-
-// State variables for the stabilizer
-static setpoint_t setpoint;
-static sensorData_t sensorData;
-static state_t state;
-static control_t control;
-
-static StateEstimatorType estimatorType;
-static ControllerType controllerType;
-
-typedef enum { configureAcc, measureNoiseFloor, measureProp, testBattery, restartBatTest, evaluateResult, testDone } TestState;
-#ifdef RUN_PROP_TEST_AT_STARTUP
-  static TestState testState = configureAcc;
-#else
-  static TestState testState = testDone;
-#endif
-
-static STATS_CNT_RATE_DEFINE(stabilizerRate, 500);
-static rateSupervisor_t rateSupervisorContext;
-static bool rateWarningDisplayed = false;
-
-static struct {
-  // position - mm
-  int16_t x;
-  int16_t y;
-  int16_t z;
-  // velocity - mm / sec
-  int16_t vx;
-  int16_t vy;
-  int16_t vz;
-  // acceleration - mm / sec^2
-  int16_t ax;
-  int16_t ay;
-  int16_t az;
-  // compressed quaternion, see quatcompress.h
-  int32_t quat;
-  // angular velocity - milliradians / sec
-  int16_t rateRoll;
-  int16_t ratePitch;
-  int16_t rateYaw;
-} stateCompressed;
-
-static struct {
-  // position - mm
-  int16_t x;
-  int16_t y;
-  int16_t z;
-  // velocity - mm / sec
-  int16_t vx;
-  int16_t vy;
-  int16_t vz;
-  // acceleration - mm / sec^2
-  int16_t ax;
-  int16_t ay;
-  int16_t az;
-} setpointCompressed;
-
-static float accVarX[NBR_OF_MOTORS];
-static float accVarY[NBR_OF_MOTORS];
-static float accVarZ[NBR_OF_MOTORS];
-// Bit field indicating if the motors passed the motor test.
-// Bit 0 - 1 = M1 passed
-// Bit 1 - 1 = M2 passed
-// Bit 2 - 1 = M3 passed
-// Bit 3 - 1 = M4 passed
-static uint8_t motorPass = 0;
-static uint16_t motorTestCount = 0;
-
-STATIC_MEM_TASK_ALLOC(stabilizerTask, STABILIZER_TASK_STACKSIZE);
-
+static void stabilizerAltHoldUpdate(void);
+static void distributePower(const uint16_t thrust, const int16_t roll,
+                            const int16_t pitch, const int16_t yaw);
+static uint16_t limitThrust(int32_t value);
 static void stabilizerTask(void* param);
-static void testProps(sensorData_t *sensors);
+static float constrain(float value, const float minVal, const float maxVal);
+static float deadband(float value, const float threshold);
 
-static void calcSensorToOutputLatency(const sensorData_t *sensorData)
-{
-  uint64_t outTimestamp = usecTimestamp();
-  inToOutLatency = outTimestamp - sensorData->interruptTimestamp;
-}
-
-static void compressState()
-{
-  stateCompressed.x = state.position.x * 1000.0f;
-  stateCompressed.y = state.position.y * 1000.0f;
-  stateCompressed.z = state.position.z * 1000.0f;
-
-  stateCompressed.vx = state.velocity.x * 1000.0f;
-  stateCompressed.vy = state.velocity.y * 1000.0f;
-  stateCompressed.vz = state.velocity.z * 1000.0f;
-
-  stateCompressed.ax = state.acc.x * 9.81f * 1000.0f;
-  stateCompressed.ay = state.acc.y * 9.81f * 1000.0f;
-  stateCompressed.az = (state.acc.z + 1) * 9.81f * 1000.0f;
-
-  float const q[4] = {
-    state.attitudeQuaternion.x,
-    state.attitudeQuaternion.y,
-    state.attitudeQuaternion.z,
-    state.attitudeQuaternion.w};
-  stateCompressed.quat = quatcompress(q);
-
-  float const deg2millirad = ((float)M_PI * 1000.0f) / 180.0f;
-  stateCompressed.rateRoll = sensorData.gyro.x * deg2millirad;
-  stateCompressed.ratePitch = -sensorData.gyro.y * deg2millirad;
-  stateCompressed.rateYaw = sensorData.gyro.z * deg2millirad;
-}
-
-static void compressSetpoint()
-{
-  setpointCompressed.x = setpoint.position.x * 1000.0f;
-  setpointCompressed.y = setpoint.position.y * 1000.0f;
-  setpointCompressed.z = setpoint.position.z * 1000.0f;
-
-  setpointCompressed.vx = setpoint.velocity.x * 1000.0f;
-  setpointCompressed.vy = setpoint.velocity.y * 1000.0f;
-  setpointCompressed.vz = setpoint.velocity.z * 1000.0f;
-
-  setpointCompressed.ax = setpoint.acceleration.x * 1000.0f;
-  setpointCompressed.ay = setpoint.acceleration.y * 1000.0f;
-  setpointCompressed.az = setpoint.acceleration.z * 1000.0f;
-}
-
-void stabilizerInit(StateEstimatorType estimator)
+void stabilizerInit(void)
 {
   if(isInit)
     return;
 
-  sensorsInit();
-  if (estimator == anyEstimator) {
-    estimator = deckGetRequiredEstimator();
-  }
-  stateEstimatorInit(estimator);
-  controllerInit(ControllerTypeAny);
-  powerDistributionInit();
-  sitAwInit();
-  //collisionAvoidanceInit();
-  estimatorType = getStateEstimator();
-  controllerType = getControllerType();
+  motorsInit();
+  imu6Init();
+  sensfusion6Init();
+  controllerInit();
 
-  STATIC_MEM_TASK_CREATE(stabilizerTask, stabilizerTask, STABILIZER_TASK_NAME, NULL, STABILIZER_TASK_PRI);
+  rollRateDesired = 0;
+  pitchRateDesired = 0;
+  yawRateDesired = 0;
+
+  xTaskCreate(stabilizerTask, (const signed char * const)STABILIZER_TASK_NAME,
+              STABILIZER_TASK_STACKSIZE, NULL, STABILIZER_TASK_PRI, NULL);
 
   isInit = true;
 }
@@ -212,496 +166,335 @@ bool stabilizerTest(void)
 {
   bool pass = true;
 
-  pass &= sensorsTest();
-  pass &= stateEstimatorTest();
+  pass &= motorsTest();
+  pass &= imu6Test();
+  pass &= sensfusion6Test();
   pass &= controllerTest();
-  pass &= powerDistributionTest();
-  //pass &= collisionAvoidanceTest();
 
   return pass;
 }
 
-static void checkEmergencyStopTimeout()
-{
-  if (emergencyStopTimeout >= 0) {
-    emergencyStopTimeout -= 1;
-
-    if (emergencyStopTimeout == 0) {
-      emergencyStop = true;
-    }
-  }
-}
-
-/* The stabilizer loop runs at 1kHz (stock) or 500Hz (kalman). It is the
- * responsibility of the different functions to run slower by skipping call
- * (ie. returning without modifying the output structure).
- */
-
 static void stabilizerTask(void* param)
 {
-  uint32_t tick;
+  uint32_t attitudeCounter = 0;
+  uint32_t altHoldCounter = 0;
   uint32_t lastWakeTime;
 
-#ifdef configUSE_APPLICATION_TASK_TAG
-	#if configUSE_APPLICATION_TASK_TAG == 1
   vTaskSetApplicationTaskTag(0, (void*)TASK_STABILIZER_ID_NBR);
-  #endif
-#endif
 
   //Wait for the system to be fully started to start stabilization loop
   systemWaitStart();
 
-  DEBUG_PRINTI("Wait for sensor calibration...\n");
+  lastWakeTime = xTaskGetTickCount ();
 
-  // Wait for sensors to be calibrated
-  lastWakeTime = xTaskGetTickCount();
-  while(!sensorsAreCalibrated()) {
-    vTaskDelayUntil(&lastWakeTime, F2T(RATE_MAIN_LOOP));
-  }
-  // Initialize tick to something else then 0
-  tick = 1;
-
-  rateSupervisorInit(&rateSupervisorContext, xTaskGetTickCount(), M2T(1000), 997, 1003, 1);
-
-  DEBUG_PRINTI("Ready to fly.\n");
-
-  while(1) {
-    // The sensor should unlock at 1kHz
-    sensorsWaitDataReady();
-
-    if (startPropTest != false) {
-      // TODO: What happens with estimator when we run tests after startup?
-      testState = configureAcc;
-      startPropTest = false;
-    }
-
-    if (testState != testDone) {
-      sensorsAcquire(&sensorData, tick);
-      testProps(&sensorData);
-    } else {
-      // allow to update estimator dynamically
-      if (getStateEstimator() != estimatorType) {
-        stateEstimatorSwitchTo(estimatorType);
-        estimatorType = getStateEstimator();
-      }
-      // allow to update controller dynamically
-      if (getControllerType() != controllerType) {
-        controllerInit(controllerType);
-        controllerType = getControllerType();
-      }
-
-      stateEstimator(&state, &sensorData, &control, tick);
-      compressState();
-
-      commanderGetSetpoint(&setpoint, &state);
-      compressSetpoint();
-
-      sitAwUpdateSetpoint(&setpoint, &sensorData, &state);
-      //collisionAvoidanceUpdateSetpoint(&setpoint, &sensorData, &state, tick);
-
-      controller(&control, &setpoint, &sensorData, &state, tick);
-
-      checkEmergencyStopTimeout();
-
-      checkStops = systemIsArmed();
-      if (emergencyStop || (systemIsArmed() == false)) {
-        powerStop();
-      } else {
-        powerDistribution(&control);
-      }
-
-      //TODO: Log data to uSD card if configured
-      /*if (usddeckLoggingEnabled()
-          && usddeckLoggingMode() == usddeckLoggingMode_SynchronousStabilizer
-          && RATE_DO_EXECUTE(usddeckFrequency(), tick)) {
-        usddeckTriggerLogging();
-      }*/
-    }
-    calcSensorToOutputLatency(&sensorData);
-    tick++;
-    STATS_CNT_RATE_EVENT(&stabilizerRate);
-
-    if (!rateSupervisorValidate(&rateSupervisorContext, xTaskGetTickCount())) {
-      if (!rateWarningDisplayed) {
-        DEBUG_PRINT("WARNING: stabilizer loop rate is off (%"PRIu32")\n", rateSupervisorLatestCount(&rateSupervisorContext));
-        rateWarningDisplayed = true;
-      }
-    }
-  }
-}
-
-void stabilizerSetEmergencyStop()
-{
-  emergencyStop = true;
-}
-
-void stabilizerResetEmergencyStop()
-{
-  emergencyStop = false;
-}
-
-void stabilizerSetEmergencyStopTimeout(int timeout)
-{
-  emergencyStop = false;
-  emergencyStopTimeout = timeout;
-}
-
-static float variance(float *buffer, uint32_t length)
-{
-  uint32_t i;
-  float sum = 0;
-  float sumSq = 0;
-
-  for (i = 0; i < length; i++)
+  while(1)
   {
-    sum += buffer[i];
-    sumSq += buffer[i] * buffer[i];
-  }
+    vTaskDelayUntil(&lastWakeTime, F2T(IMU_UPDATE_FREQ)); // 500Hz
 
-  return sumSq - (sum * sum) / length;
-}
+    // Magnetometer not yet used more then for logging.
+    imu9Read(&gyro, &acc, &mag);
 
-/** Evaluate the values from the propeller test
- * @param low The low limit of the self test
- * @param high The high limit of the self test
- * @param value The value to compare with.
- * @param string A pointer to a string describing the value.
- * @return True if self test within low - high limit, false otherwise
- */
-static bool evaluateTest(float low, float high, float value, uint8_t motor)
-{
-  if (value < low || value > high)
-  {
-    DEBUG_PRINTI("Propeller test on M%d [FAIL]. low: %0.2f, high: %0.2f, measured: %0.2f\n",
-                motor + 1, (double)low, (double)high, (double)value);
-    return false;
-  }
-
-  motorPass |= (1 << motor);
-
-  return true;
-}
-
-
-static void testProps(sensorData_t *sensors)
-{
-  static uint32_t i = 0;
-  NO_DMA_CCM_SAFE_ZERO_INIT static float accX[PROPTEST_NBR_OF_VARIANCE_VALUES];
-  NO_DMA_CCM_SAFE_ZERO_INIT static float accY[PROPTEST_NBR_OF_VARIANCE_VALUES];
-  NO_DMA_CCM_SAFE_ZERO_INIT static float accZ[PROPTEST_NBR_OF_VARIANCE_VALUES];
-  static float accVarXnf;
-  static float accVarYnf;
-  static float accVarZnf;
-  static int motorToTest = 0;
-  static uint8_t nrFailedTests = 0;
-  static float idleVoltage;
-  static float minSingleLoadedVoltage[NBR_OF_MOTORS];
-  static float minLoadedVoltage;
-
-  if (testState == configureAcc)
-  {
-    motorPass = 0;
-    sensorsSetAccMode(ACC_MODE_PROPTEST);
-    testState = measureNoiseFloor;
-    minLoadedVoltage = idleVoltage = pmGetBatteryVoltage();
-    minSingleLoadedVoltage[MOTOR_M1] = minLoadedVoltage;
-    minSingleLoadedVoltage[MOTOR_M2] = minLoadedVoltage;
-    minSingleLoadedVoltage[MOTOR_M3] = minLoadedVoltage;
-    minSingleLoadedVoltage[MOTOR_M4] = minLoadedVoltage;
-  }
-  if (testState == measureNoiseFloor)
-  {
-    accX[i] = sensors->acc.x;
-    accY[i] = sensors->acc.y;
-    accZ[i] = sensors->acc.z;
-
-    if (++i >= PROPTEST_NBR_OF_VARIANCE_VALUES)
+    if (imu6IsCalibrated())
     {
-      i = 0;
-      accVarXnf = variance(accX, PROPTEST_NBR_OF_VARIANCE_VALUES);
-      accVarYnf = variance(accY, PROPTEST_NBR_OF_VARIANCE_VALUES);
-      accVarZnf = variance(accZ, PROPTEST_NBR_OF_VARIANCE_VALUES);
-      DEBUG_PRINTI("Acc noise floor variance X+Y:%f, (Z:%f)\n",
-                  (double)accVarXnf + (double)accVarYnf, (double)accVarZnf);
-      testState = measureProp;
-    }
+      commanderGetRPY(&eulerRollDesired, &eulerPitchDesired, &eulerYawDesired);
+      commanderGetRPYType(&rollType, &pitchType, &yawType);
 
-  }
-  else if (testState == measureProp)
-  {
-    if (i < PROPTEST_NBR_OF_VARIANCE_VALUES)
-    {
-      accX[i] = sensors->acc.x;
-      accY[i] = sensors->acc.y;
-      accZ[i] = sensors->acc.z;
-      if (pmGetBatteryVoltage() < minSingleLoadedVoltage[motorToTest])
+      // 250HZ
+      if (++attitudeCounter >= ATTITUDE_UPDATE_RATE_DIVIDER)
       {
-        minSingleLoadedVoltage[motorToTest] = pmGetBatteryVoltage();
-      }
-    }
-    i++;
+        sensfusion6UpdateQ(gyro.x, gyro.y, gyro.z, acc.x, acc.y, acc.z, FUSION_UPDATE_DT);
+        sensfusion6GetEulerRPY(&eulerRollActual, &eulerPitchActual, &eulerYawActual);
 
-    if (i == 1)
-    {
-      motorsSetRatio(motorToTest, 0xFFFF);
-    }
-    else if (i == 50)
-    {
-      motorsSetRatio(motorToTest, 0);
-    }
-    else if (i == PROPTEST_NBR_OF_VARIANCE_VALUES)
-    {
-      accVarX[motorToTest] = variance(accX, PROPTEST_NBR_OF_VARIANCE_VALUES);
-      accVarY[motorToTest] = variance(accY, PROPTEST_NBR_OF_VARIANCE_VALUES);
-      accVarZ[motorToTest] = variance(accZ, PROPTEST_NBR_OF_VARIANCE_VALUES);
-      DEBUG_PRINTI("Motor M%d variance X+Y:%f (Z:%f)\n",
-                   motorToTest+1, (double)accVarX[motorToTest] + (double)accVarY[motorToTest],
-                   (double)accVarZ[motorToTest]);
-    }
-    else if (i >= 1000)
-    {
-      i = 0;
-      motorToTest++;
-      if (motorToTest >= NBR_OF_MOTORS)
-      {
-        i = 0;
-        motorToTest = 0;
-        testState = evaluateResult;
-        sensorsSetAccMode(ACC_MODE_FLIGHT);
+        accWZ = sensfusion6GetAccZWithoutGravity(acc.x, acc.y, acc.z);
+        accMAG = (acc.x*acc.x) + (acc.y*acc.y) + (acc.z*acc.z);
+        // Estimate speed from acc (drifts)
+        vSpeed += deadband(accWZ, vAccDeadband) * FUSION_UPDATE_DT;
+
+        controllerCorrectAttitudePID(eulerRollActual, eulerPitchActual, eulerYawActual,
+                                     eulerRollDesired, eulerPitchDesired, -eulerYawDesired,
+                                     &rollRateDesired, &pitchRateDesired, &yawRateDesired);
+        attitudeCounter = 0;
       }
-    }
-  }
-  else if (testState == testBattery)
-  {
-    if (i == 0)
-    {
-      minLoadedVoltage = idleVoltage = pmGetBatteryVoltage();
-    }
-    if (i == 1)
-    {
-      motorsSetRatio(MOTOR_M1, 0xFFFF);
-      motorsSetRatio(MOTOR_M2, 0xFFFF);
-      motorsSetRatio(MOTOR_M3, 0xFFFF);
-      motorsSetRatio(MOTOR_M4, 0xFFFF);
-    }
-    else if (i < 50)
-    {
-      if (pmGetBatteryVoltage() < minLoadedVoltage)
-        minLoadedVoltage = pmGetBatteryVoltage();
-    }
-    else if (i == 50)
-    {
-      motorsSetRatio(MOTOR_M1, 0);
-      motorsSetRatio(MOTOR_M2, 0);
-      motorsSetRatio(MOTOR_M3, 0);
-      motorsSetRatio(MOTOR_M4, 0);
-//      DEBUG_PRINT("IdleV: %f, minV: %f, M1V: %f, M2V: %f, M3V: %f, M4V: %f\n", (double)idleVoltage,
-//                  (double)minLoadedVoltage,
-//                  (double)minSingleLoadedVoltage[MOTOR_M1],
-//                  (double)minSingleLoadedVoltage[MOTOR_M2],
-//                  (double)minSingleLoadedVoltage[MOTOR_M3],
-//                  (double)minSingleLoadedVoltage[MOTOR_M4]);
-      DEBUG_PRINTI("%f %f %f %f %f %f\n", (double)idleVoltage,
-                  (double)(idleVoltage - minLoadedVoltage),
-                  (double)(idleVoltage - minSingleLoadedVoltage[MOTOR_M1]),
-                  (double)(idleVoltage - minSingleLoadedVoltage[MOTOR_M2]),
-                  (double)(idleVoltage - minSingleLoadedVoltage[MOTOR_M3]),
-                  (double)(idleVoltage - minSingleLoadedVoltage[MOTOR_M4]));
-      testState = restartBatTest;
-      i = 0;
-    }
-    i++;
-  }
-  else if (testState == restartBatTest)
-  {
-    if (i++ > 2000)
-    {
-      testState = configureAcc;
-      i = 0;
-    }
-  }
-  else if (testState == evaluateResult)
-  {
-    for (int m = 0; m < NBR_OF_MOTORS; m++)
-    {
-      if (!evaluateTest(0, PROPELLER_BALANCE_TEST_THRESHOLD,  accVarX[m] + accVarY[m], m))
+
+      // 100HZ
+      if (imuHasBarometer() && (++altHoldCounter >= ALTHOLD_UPDATE_RATE_DIVIDER))
       {
-        nrFailedTests++;
-        for (int j = 0; j < 3; j++)
-        {
-          motorsBeep(m, true, testsound[m], (uint16_t)(MOTORS_TIM_BEEP_CLK_FREQ / A4)/ 20);
-          vTaskDelay(M2T(MOTORS_TEST_ON_TIME_MS));
-          motorsBeep(m, false, 0, 0);
-          vTaskDelay(M2T(100));
-        }
+        stabilizerAltHoldUpdate();
+        altHoldCounter = 0;
       }
-    }
-#ifdef PLAY_STARTUP_MELODY_ON_MOTORS
-    if (nrFailedTests == 0)
-    {
-      for (int m = 0; m < NBR_OF_MOTORS; m++)
+
+      if (rollType == RATE)
       {
-        motorsBeep(m, true, testsound[m], (uint16_t)(MOTORS_TIM_BEEP_CLK_FREQ / A4)/ 20);
-        vTaskDelay(M2T(MOTORS_TEST_ON_TIME_MS));
-        motorsBeep(m, false, 0, 0);
-        vTaskDelay(M2T(MOTORS_TEST_DELAY_TIME_MS));
+        rollRateDesired = eulerRollDesired;
       }
-    }
+      if (pitchType == RATE)
+      {
+        pitchRateDesired = eulerPitchDesired;
+      }
+      if (yawType == RATE)
+      {
+        yawRateDesired = -eulerYawDesired;
+      }
+
+      // TODO: Investigate possibility to subtract gyro drift.
+      controllerCorrectRatePID(gyro.x, -gyro.y, gyro.z,
+                               rollRateDesired, pitchRateDesired, yawRateDesired);
+
+      controllerGetActuatorOutput(&actuatorRoll, &actuatorPitch, &actuatorYaw);
+
+      if (!altHold || !imuHasBarometer())
+      {
+        // Use thrust from controller if not in altitude hold mode
+        commanderGetThrust(&actuatorThrust);
+      }
+      else
+      {
+        // Added so thrust can be set to 0 while in altitude hold mode after disconnect
+        commanderWatchdog();
+      }
+
+      if (actuatorThrust > 0)
+      {
+#if defined(TUNE_ROLL)
+        distributePower(actuatorThrust, actuatorRoll, 0, 0);
+#elif defined(TUNE_PITCH)
+        distributePower(actuatorThrust, 0, actuatorPitch, 0);
+#elif defined(TUNE_YAW)
+        distributePower(actuatorThrust, 0, 0, -actuatorYaw);
+#else
+        distributePower(actuatorThrust, actuatorRoll, actuatorPitch, -actuatorYaw);
 #endif
-    motorTestCount++;
-    testState = testDone;
+      }
+      else
+      {
+        distributePower(0, 0, 0, 0);
+        controllerResetAllPID();
+      }
+    }
   }
 }
-PARAM_GROUP_START(health)
-PARAM_ADD(PARAM_UINT8, startPropTest, &startPropTest)
-PARAM_GROUP_STOP(health)
 
+static void stabilizerAltHoldUpdate(void)
+{
+  // Get altitude hold commands from pilot
+  commanderGetAltHold(&altHold, &setAltHold, &altHoldChange);
 
-PARAM_GROUP_START(stabilizer)
-PARAM_ADD(PARAM_UINT8, estimator, &estimatorType)
-PARAM_ADD(PARAM_UINT8, controller, &controllerType)
-PARAM_ADD(PARAM_UINT8, stop, &emergencyStop)
-PARAM_GROUP_STOP(stabilizer)
+  // Get barometer height estimates
+  //TODO do the smoothing within getData
+  lps25hGetData(&pressure, &temperature, &aslRaw);
 
-LOG_GROUP_START(health)
-LOG_ADD(LOG_FLOAT, motorVarXM1, &accVarX[0])
-LOG_ADD(LOG_FLOAT, motorVarYM1, &accVarY[0])
-LOG_ADD(LOG_FLOAT, motorVarXM2, &accVarX[1])
-LOG_ADD(LOG_FLOAT, motorVarYM2, &accVarY[1])
-LOG_ADD(LOG_FLOAT, motorVarXM3, &accVarX[2])
-LOG_ADD(LOG_FLOAT, motorVarYM3, &accVarY[2])
-LOG_ADD(LOG_FLOAT, motorVarXM4, &accVarX[3])
-LOG_ADD(LOG_FLOAT, motorVarYM4, &accVarY[3])
-LOG_ADD(LOG_UINT8, motorPass, &motorPass)
-LOG_ADD(LOG_UINT16, motorTestCount, &motorTestCount)
-LOG_ADD(LOG_UINT8, checkStops, &checkStops)
-LOG_GROUP_STOP(health)
+  asl = asl * aslAlpha + aslRaw * (1 - aslAlpha);
+  aslLong = aslLong * aslAlphaLong + aslRaw * (1 - aslAlphaLong);
 
-LOG_GROUP_START(ctrltarget)
-LOG_ADD(LOG_FLOAT, x, &setpoint.position.x)
-LOG_ADD(LOG_FLOAT, y, &setpoint.position.y)
-LOG_ADD(LOG_FLOAT, z, &setpoint.position.z)
+  // Estimate vertical speed based on successive barometer readings. This is ugly :)
+  vSpeedASL = deadband(asl - aslLong, vSpeedASLDeadband);
 
-LOG_ADD(LOG_FLOAT, vx, &setpoint.velocity.x)
-LOG_ADD(LOG_FLOAT, vy, &setpoint.velocity.y)
-LOG_ADD(LOG_FLOAT, vz, &setpoint.velocity.z)
+  // Estimate vertical speed based on Acc - fused with baro to reduce drift
+  vSpeed = constrain(vSpeed, -vSpeedLimit, vSpeedLimit);
+  vSpeed = vSpeed * vBiasAlpha + vSpeedASL * (1.f - vBiasAlpha);
+  vSpeedAcc = vSpeed;
 
-LOG_ADD(LOG_FLOAT, ax, &setpoint.acceleration.x)
-LOG_ADD(LOG_FLOAT, ay, &setpoint.acceleration.y)
-LOG_ADD(LOG_FLOAT, az, &setpoint.acceleration.z)
+  // Reset Integral gain of PID controller if being charged
+  if (!pmIsDischarging())
+  {
+    altHoldPID.integ = 0.0;
+  }
 
-LOG_ADD(LOG_FLOAT, roll, &setpoint.attitude.roll)
-LOG_ADD(LOG_FLOAT, pitch, &setpoint.attitude.pitch)
-LOG_ADD(LOG_FLOAT, yaw, &setpoint.attitudeRate.yaw)
-LOG_GROUP_STOP(ctrltarget)
+  // Altitude hold mode just activated, set target altitude as current altitude. Reuse previous integral term as a starting point
+  if (setAltHold)
+  {
+    // Set to current altitude
+    altHoldTarget = asl;
 
-LOG_GROUP_START(ctrltargetZ)
-LOG_ADD(LOG_INT16, x, &setpointCompressed.x)   // position - mm
-LOG_ADD(LOG_INT16, y, &setpointCompressed.y)
-LOG_ADD(LOG_INT16, z, &setpointCompressed.z)
+    // Cache last integral term for reuse after pid init
+    const float pre_integral = altHoldPID.integ;
 
-LOG_ADD(LOG_INT16, vx, &setpointCompressed.vx) // velocity - mm / sec
-LOG_ADD(LOG_INT16, vy, &setpointCompressed.vy)
-LOG_ADD(LOG_INT16, vz, &setpointCompressed.vz)
+    // Reset PID controller
+    pidInit(&altHoldPID, asl, altHoldKp, altHoldKi, altHoldKd,
+            ALTHOLD_UPDATE_DT);
+    // TODO set low and high limits depending on voltage
+    // TODO for now just use previous I value and manually set limits for whole voltage range
+    //                    pidSetIntegralLimit(&altHoldPID, 12345);
+    //                    pidSetIntegralLimitLow(&altHoldPID, 12345);              /
 
-LOG_ADD(LOG_INT16, ax, &setpointCompressed.ax) // acceleration - mm / sec^2
-LOG_ADD(LOG_INT16, ay, &setpointCompressed.ay)
-LOG_ADD(LOG_INT16, az, &setpointCompressed.az)
-LOG_GROUP_STOP(ctrltargetZ)
+    altHoldPID.integ = pre_integral;
+
+    // Reset altHoldPID
+    altHoldPIDVal = pidUpdate(&altHoldPID, asl, false);
+  }
+
+  // In altitude hold mode
+  if (altHold)
+  {
+    // Update target altitude from joy controller input
+    altHoldTarget += altHoldChange / altHoldChange_SENS;
+    pidSetDesired(&altHoldPID, altHoldTarget);
+
+    // Compute error (current - target), limit the error
+    altHoldErr = constrain(deadband(asl - altHoldTarget, errDeadband),
+                           -altHoldErrMax, altHoldErrMax);
+    pidSetError(&altHoldPID, -altHoldErr);
+
+    // Get control from PID controller, dont update the error (done above)
+    // Smooth it and include barometer vspeed
+    // TODO same as smoothing the error??
+    altHoldPIDVal = (pidAlpha) * altHoldPIDVal + (1.f - pidAlpha) * ((vSpeedAcc * vSpeedAccFac) +
+                    (vSpeedASL * vSpeedASLFac) + pidUpdate(&altHoldPID, asl, false));
+
+    // compute new thrust
+    actuatorThrust =  max(altHoldMinThrust, min(altHoldMaxThrust,
+                          limitThrust( altHoldBaseThrust + (int32_t)(altHoldPIDVal*pidAslFac))));
+
+    // i part should compensate for voltage drop
+
+  }
+  else
+  {
+    altHoldTarget = 0.0;
+    altHoldErr = 0.0;
+    altHoldPIDVal = 0.0;
+  }
+}
+
+static void distributePower(const uint16_t thrust, const int16_t roll,
+                            const int16_t pitch, const int16_t yaw)
+{
+#ifdef QUAD_FORMATION_X
+  int16_t r = roll >> 1;
+  int16_t p = pitch >> 1;
+  motorPowerM1 = limitThrust(thrust - r + p + yaw);
+  motorPowerM2 = limitThrust(thrust - r - p - yaw);
+  motorPowerM3 =  limitThrust(thrust + r - p + yaw);
+  motorPowerM4 =  limitThrust(thrust + r + p - yaw);
+#else // QUAD_FORMATION_NORMAL
+  motorPowerM1 = limitThrust(thrust + pitch + yaw);
+  motorPowerM2 = limitThrust(thrust - roll - yaw);
+  motorPowerM3 =  limitThrust(thrust - pitch + yaw);
+  motorPowerM4 =  limitThrust(thrust + roll - yaw);
+#endif
+
+  motorsSetRatio(MOTOR_M1, motorPowerM1);
+  motorsSetRatio(MOTOR_M2, motorPowerM2);
+  motorsSetRatio(MOTOR_M3, motorPowerM3);
+  motorsSetRatio(MOTOR_M4, motorPowerM4);
+}
+
+static uint16_t limitThrust(int32_t value)
+{
+  if(value > UINT16_MAX)
+  {
+    value = UINT16_MAX;
+  }
+  else if(value < 0)
+  {
+    value = 0;
+  }
+
+  return (uint16_t)value;
+}
+
+// Constrain value between min and max
+static float constrain(float value, const float minVal, const float maxVal)
+{
+  return min(maxVal, max(minVal,value));
+}
+
+// Deadzone
+static float deadband(float value, const float threshold)
+{
+  if (fabs(value) < threshold)
+  {
+    value = 0;
+  }
+  else if (value > 0)
+  {
+    value -= threshold;
+  }
+  else if (value < 0)
+  {
+    value += threshold;
+  }
+  return value;
+}
 
 LOG_GROUP_START(stabilizer)
-LOG_ADD(LOG_FLOAT, roll, &state.attitude.roll)
-LOG_ADD(LOG_FLOAT, pitch, &state.attitude.pitch)
-LOG_ADD(LOG_FLOAT, yaw, &state.attitude.yaw)
-LOG_ADD(LOG_FLOAT, thrust, &control.thrust)
-
-STATS_CNT_RATE_LOG_ADD(rtStab, &stabilizerRate)
-LOG_ADD(LOG_UINT32, intToOut, &inToOutLatency)
+LOG_ADD(LOG_FLOAT, roll, &eulerRollActual)
+LOG_ADD(LOG_FLOAT, pitch, &eulerPitchActual)
+LOG_ADD(LOG_FLOAT, yaw, &eulerYawActual)
+LOG_ADD(LOG_UINT16, thrust, &actuatorThrust)
 LOG_GROUP_STOP(stabilizer)
 
 LOG_GROUP_START(acc)
-LOG_ADD(LOG_FLOAT, x, &sensorData.acc.x)
-LOG_ADD(LOG_FLOAT, y, &sensorData.acc.y)
-LOG_ADD(LOG_FLOAT, z, &sensorData.acc.z)
+LOG_ADD(LOG_FLOAT, x, &acc.x)
+LOG_ADD(LOG_FLOAT, y, &acc.y)
+LOG_ADD(LOG_FLOAT, z, &acc.z)
+LOG_ADD(LOG_FLOAT, zw, &accWZ)
+LOG_ADD(LOG_FLOAT, mag2, &accMAG)
 LOG_GROUP_STOP(acc)
 
-#ifdef LOG_SEC_IMU
-LOG_GROUP_START(accSec)
-LOG_ADD(LOG_FLOAT, x, &sensorData.accSec.x)
-LOG_ADD(LOG_FLOAT, y, &sensorData.accSec.y)
-LOG_ADD(LOG_FLOAT, z, &sensorData.accSec.z)
-LOG_GROUP_STOP(accSec)
-#endif
-
-LOG_GROUP_START(baro)
-LOG_ADD(LOG_FLOAT, asl, &sensorData.baro.asl)
-LOG_ADD(LOG_FLOAT, temp, &sensorData.baro.temperature)
-LOG_ADD(LOG_FLOAT, pressure, &sensorData.baro.pressure)
-LOG_GROUP_STOP(baro)
-
 LOG_GROUP_START(gyro)
-LOG_ADD(LOG_FLOAT, x, &sensorData.gyro.x)
-LOG_ADD(LOG_FLOAT, y, &sensorData.gyro.y)
-LOG_ADD(LOG_FLOAT, z, &sensorData.gyro.z)
+LOG_ADD(LOG_FLOAT, x, &gyro.x)
+LOG_ADD(LOG_FLOAT, y, &gyro.y)
+LOG_ADD(LOG_FLOAT, z, &gyro.z)
 LOG_GROUP_STOP(gyro)
 
-#ifdef LOG_SEC_IMU
-LOG_GROUP_START(gyroSec)
-LOG_ADD(LOG_FLOAT, x, &sensorData.gyroSec.x)
-LOG_ADD(LOG_FLOAT, y, &sensorData.gyroSec.y)
-LOG_ADD(LOG_FLOAT, z, &sensorData.gyroSec.z)
-LOG_GROUP_STOP(gyroSec)
-#endif
-
 LOG_GROUP_START(mag)
-LOG_ADD(LOG_FLOAT, x, &sensorData.mag.x)
-LOG_ADD(LOG_FLOAT, y, &sensorData.mag.y)
-LOG_ADD(LOG_FLOAT, z, &sensorData.mag.z)
+LOG_ADD(LOG_FLOAT, x, &mag.x)
+LOG_ADD(LOG_FLOAT, y, &mag.y)
+LOG_ADD(LOG_FLOAT, z, &mag.z)
 LOG_GROUP_STOP(mag)
 
-LOG_GROUP_START(controller)
-LOG_ADD(LOG_INT16, ctr_yaw, &control.yaw)
-LOG_GROUP_STOP(controller)
+LOG_GROUP_START(motor)
+LOG_ADD(LOG_INT32, m4, &motorPowerM4)
+LOG_ADD(LOG_INT32, m1, &motorPowerM1)
+LOG_ADD(LOG_INT32, m2, &motorPowerM2)
+LOG_ADD(LOG_INT32, m3, &motorPowerM3)
+LOG_GROUP_STOP(motor)
 
-LOG_GROUP_START(stateEstimate)
-LOG_ADD(LOG_FLOAT, x, &state.position.x)
-LOG_ADD(LOG_FLOAT, y, &state.position.y)
-LOG_ADD(LOG_FLOAT, z, &state.position.z)
+// LOG altitude hold PID controller states
+LOG_GROUP_START(vpid)
+LOG_ADD(LOG_FLOAT, pid, &altHoldPID)
+LOG_ADD(LOG_FLOAT, p, &altHoldPID.outP)
+LOG_ADD(LOG_FLOAT, i, &altHoldPID.outI)
+LOG_ADD(LOG_FLOAT, d, &altHoldPID.outD)
+LOG_GROUP_STOP(vpid)
 
-LOG_ADD(LOG_FLOAT, vx, &state.velocity.x)
-LOG_ADD(LOG_FLOAT, vy, &state.velocity.y)
-LOG_ADD(LOG_FLOAT, vz, &state.velocity.z)
+LOG_GROUP_START(baro)
+LOG_ADD(LOG_FLOAT, asl, &asl)
+LOG_ADD(LOG_FLOAT, aslRaw, &aslRaw)
+LOG_ADD(LOG_FLOAT, aslLong, &aslLong)
+LOG_ADD(LOG_FLOAT, temp, &temperature)
+LOG_ADD(LOG_FLOAT, pressure, &pressure)
+LOG_GROUP_STOP(baro)
 
-LOG_ADD(LOG_FLOAT, ax, &state.acc.x)
-LOG_ADD(LOG_FLOAT, ay, &state.acc.y)
-LOG_ADD(LOG_FLOAT, az, &state.acc.z)
+LOG_GROUP_START(altHold)
+LOG_ADD(LOG_FLOAT, err, &altHoldErr)
+LOG_ADD(LOG_FLOAT, target, &altHoldTarget)
+LOG_ADD(LOG_FLOAT, zSpeed, &vSpeed)
+LOG_ADD(LOG_FLOAT, vSpeed, &vSpeed)
+LOG_ADD(LOG_FLOAT, vSpeedASL, &vSpeedASL)
+LOG_ADD(LOG_FLOAT, vSpeedAcc, &vSpeedAcc)
+LOG_GROUP_STOP(altHold)
 
-LOG_ADD(LOG_FLOAT, roll, &state.attitude.roll)
-LOG_ADD(LOG_FLOAT, pitch, &state.attitude.pitch)
-LOG_ADD(LOG_FLOAT, yaw, &state.attitude.yaw)
-
-LOG_ADD(LOG_FLOAT, qx, &state.attitudeQuaternion.x)
-LOG_ADD(LOG_FLOAT, qy, &state.attitudeQuaternion.y)
-LOG_ADD(LOG_FLOAT, qz, &state.attitudeQuaternion.z)
-LOG_ADD(LOG_FLOAT, qw, &state.attitudeQuaternion.w)
-LOG_GROUP_STOP(stateEstimate)
-
-LOG_GROUP_START(stateEstimateZ)
-LOG_ADD(LOG_INT16, x, &stateCompressed.x)                 // position - mm
-LOG_ADD(LOG_INT16, y, &stateCompressed.y)
-LOG_ADD(LOG_INT16, z, &stateCompressed.z)
-
-LOG_ADD(LOG_INT16, vx, &stateCompressed.vx)               // velocity - mm / sec
-LOG_ADD(LOG_INT16, vy, &stateCompressed.vy)
-LOG_ADD(LOG_INT16, vz, &stateCompressed.vz)
-
-LOG_ADD(LOG_INT16, ax, &stateCompressed.ax)               // acceleration - mm / sec^2
-LOG_ADD(LOG_INT16, ay, &stateCompressed.ay)
-LOG_ADD(LOG_INT16, az, &stateCompressed.az)
-
-LOG_ADD(LOG_UINT32, quat, &stateCompressed.quat)           // compressed quaternion, see quatcompress.h
-
-LOG_ADD(LOG_INT16, rateRoll, &stateCompressed.rateRoll)   // angular velocity - milliradians / sec
-LOG_ADD(LOG_INT16, ratePitch, &stateCompressed.ratePitch)
-LOG_ADD(LOG_INT16, rateYaw, &stateCompressed.rateYaw)
-LOG_GROUP_STOP(stateEstimateZ)
+// Params for altitude hold
+PARAM_GROUP_START(altHold)
+PARAM_ADD(PARAM_FLOAT, aslAlpha, &aslAlpha)
+PARAM_ADD(PARAM_FLOAT, aslAlphaLong, &aslAlphaLong)
+PARAM_ADD(PARAM_FLOAT, errDeadband, &errDeadband)
+PARAM_ADD(PARAM_FLOAT, altHoldChangeSens, &altHoldChange_SENS)
+PARAM_ADD(PARAM_FLOAT, altHoldErrMax, &altHoldErrMax)
+PARAM_ADD(PARAM_FLOAT, kd, &altHoldKd)
+PARAM_ADD(PARAM_FLOAT, ki, &altHoldKi)
+PARAM_ADD(PARAM_FLOAT, kp, &altHoldKp)
+PARAM_ADD(PARAM_FLOAT, pidAlpha, &pidAlpha)
+PARAM_ADD(PARAM_FLOAT, pidAslFac, &pidAslFac)
+PARAM_ADD(PARAM_FLOAT, vAccDeadband, &vAccDeadband)
+PARAM_ADD(PARAM_FLOAT, vBiasAlpha, &vBiasAlpha)
+PARAM_ADD(PARAM_FLOAT, vSpeedAccFac, &vSpeedAccFac)
+PARAM_ADD(PARAM_FLOAT, vSpeedASLDeadband, &vSpeedASLDeadband)
+PARAM_ADD(PARAM_FLOAT, vSpeedASLFac, &vSpeedASLFac)
+PARAM_ADD(PARAM_FLOAT, vSpeedLimit, &vSpeedLimit)
+PARAM_ADD(PARAM_UINT16, baseThrust, &altHoldBaseThrust)
+PARAM_ADD(PARAM_UINT16, maxThrust, &altHoldMaxThrust)
+PARAM_ADD(PARAM_UINT16, minThrust, &altHoldMinThrust)
+PARAM_GROUP_STOP(altHold)
