@@ -52,6 +52,7 @@
 // #include "lps25h.h"
 #include "mpu6050.h"
 #include "hmc5883l.h"
+#include "bmp280.h"
 #include "ms5611.h"
 // #include "ak8963.h"
 #include "zranger.h"
@@ -78,8 +79,9 @@
  */
 //#define SENSORS_ENABLE_MAG_HM5883L
 //#define SENSORS_ENABLE_PRESSURE_MS5611
+#define SENSORS_ENABLE_PRESSURE_BMP280
 //#define SENSORS_ENABLE_RANGE_VL53L0X
- #define SENSORS_ENABLE_RANGE_VL53L1X
+#define SENSORS_ENABLE_RANGE_VL53L1X
 #define SENSORS_ENABLE_FLOW_PMW3901
 
 #define SENSORS_GYRO_FS_CFG MPU6050_GYRO_FS_2000
@@ -127,6 +129,8 @@ typedef struct {
     Axis3i16 buffer[SENSORS_NBR_OF_BIAS_SAMPLES];
 } BiasObj;
 
+
+
 static xQueueHandle accelerometerDataQueue;
 STATIC_MEM_QUEUE_ALLOC(accelerometerDataQueue, 1, sizeof(Axis3f));
 static xQueueHandle gyroDataQueue;
@@ -172,6 +176,7 @@ static bool isPmw3901Present = false;
 static bool isMpu6050TestPassed = false;
 static bool isHmc5883lTestPassed = false;
 static bool isMs5611TestPassed = false;
+static bool isBmp280TestPassed = false;
 static bool isVl53l1xTestPassed = false;
 static bool isPmw3901TestPassed = false;
 
@@ -180,6 +185,9 @@ float cosPitch;
 float sinPitch;
 float cosRoll;
 float sinRoll;
+
+float pressure;
+float temperature;
 
 // This buffer needs to hold data from all sensors
 static uint8_t buffer[SENSORS_MPU6050_BUFF_LEN + SENSORS_MAG_BUFF_LEN + SENSORS_BARO_BUFF_LEN] = {0};
@@ -298,11 +306,17 @@ void sensorsMpu6050Hmc5883lMs5611WaitDataReady(void)
 void processBarometerMeasurements(const uint8_t *buffer)
 {
 
-    ms5611GetData(&pressure, &temperature, &asl);
-   
-    sensorData.baro.pressure = pressure;
-    sensorData.baro.temperature = temperature;
-    sensorData.baro.asl = asl;
+    if (bmp280ReadPressureAndTemperature(&pressure, &temperature)) {
+        
+        // Update altitude hold
+        sensorData.baro.pressure = pressure;
+        sensorData.baro.temperature = temperature;
+        sensorData.baro.asl = bmp280PressureToAltitude(pressure);
+        DEBUG_PRINTI("BMP280: Pressure: %f Pa, Temperature: %f °C, Altitude: %f meters\n", pressure, temperature, sensorData.baro.asl);
+
+    } else {
+        DEBUG_PRINT("BMP280: Failed to read pressure and temperature\n");
+    }
     
 
 }
@@ -481,6 +495,16 @@ static void sensorsDeviceInit(void)
     }
 
 #endif
+
+#ifdef SENSORS_ENABLE_PRESSURE_BMP280
+if (bmp280Init(I2C0_DEV)) {
+    isBarometerPresent = true;
+    DEBUG_PRINTI("BMP280 I2C connection [OK].\n");
+} else {
+    DEBUG_PRINTW("BMP280 I2C connection [FAIL].\n");
+}
+#endif
+
 #ifdef SENSORS_ENABLE_PRESSURE_MS5611
     if (ms5611Init(I2C0_DEV)) {
         isBarometerPresent = true;
@@ -710,6 +734,16 @@ bool sensorsMpu6050Hmc5883lMs5611Test(void)
         testStatus &= isHmc5883lTestPassed;
     }
 
+#endif
+
+#ifdef SENSORS_ENABLE_PRESSURE_BMP280
+testStatus &= isBarometerPresent;
+
+    if (testStatus) {
+        // Add BMP280-specific self-test if required, or use a generic test
+        isBmp280TestPassed = bmp280SelfTest();
+        testStatus &= isBmp280TestPassed;
+    }
 #endif
 
 #ifdef SENSORS_ENABLE_PRESSURE_MS5611
