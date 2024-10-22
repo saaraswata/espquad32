@@ -38,11 +38,11 @@ Additional third party copyrighted code is included under the following licenses
 
 ### Support Policy
 
-Limited Support
+Any kind of modifications as long as plausible are welcome. Support till 2028.
 
 ### THANKS
 
 1. Thanks to Bitcraze for the great [Crazyflie project](https://www.bitcraze.io/%20).
 2. Thanks to Espressif for the powerful [ESP-IDF framework](https://docs.espressif.com/projects/esp-idf/en/latest/esp32s2/get-started/index.html).
 3. Thanks to WhyEngineer for the useful [ESP-DSP lib](https://github.com/whyengineer/esp32-lin/tree/master/components/dsp_lib).
-
+4. Thanks to Espressif for the ESP-Drone port of Crazyflie firmware.
